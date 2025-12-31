@@ -1,10 +1,11 @@
-use serde_json::json;
 use crate::{AnthropicAuthError, Result};
+use serde_json::json;
 
 // OAuth constants
 pub(super) const SCOPE: &str = "org:create_api_key user:profile user:inference";
 pub(super) const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
-pub(super) const API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
+pub(super) const API_KEY_URL: &str =
+    "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
 pub(super) const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 
 /// Build the token exchange request body
@@ -25,10 +26,7 @@ pub(super) fn build_token_request(
 }
 
 /// Build the refresh token request body
-pub(super) fn build_refresh_request(
-    refresh_token: &str,
-    client_id: &str,
-) -> serde_json::Value {
+pub(super) fn build_refresh_request(refresh_token: &str, client_id: &str) -> serde_json::Value {
     json!({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -60,7 +58,9 @@ pub(super) fn create_http_error(status: u16, body: &str) -> AnthropicAuthError {
         403 => Some("Access forbidden - you may not have permission to perform this action."),
         404 => Some("Endpoint not found - the API URL may have changed."),
         429 => Some("Rate limit exceeded - please wait before retrying."),
-        500..=599 => Some("Server error - this is an issue on Anthropic's side. Please try again later."),
+        500..=599 => {
+            Some("Server error - this is an issue on Anthropic's side. Please try again later.")
+        }
         _ => None,
     };
 

@@ -53,11 +53,11 @@
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = AsyncOAuthClient::new(OAuthConfig::default())?;
 //! let flow = client.start_flow(OAuthMode::Max)?;
-//! 
+//!
 //! println!("Visit: {}", flow.authorization_url);
 //! // User authorizes and receives response in format: "code#state"
 //! let response = "code123#state456";
-//! 
+//!
 //! // Library automatically parses and validates the state
 //! let tokens = client.exchange_code(response, &flow.state, &flow.verifier).await?;
 //! println!("Got tokens!");

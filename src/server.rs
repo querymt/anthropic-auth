@@ -88,11 +88,9 @@ pub async fn run_callback_server(port: u16, expected_state: &str) -> Result<Call
         .with_state(state);
 
     let addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|e| {
-            AnthropicAuthError::CallbackServer(format!("Failed to bind to {}: {}", addr, e))
-        })?;
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        AnthropicAuthError::CallbackServer(format!("Failed to bind to {}: {}", addr, e))
+    })?;
 
     // Spawn server task
     tokio::spawn(async move {
@@ -185,9 +183,12 @@ async fn handle_callback(
             )
         }
         None => {
-            let _ = state.tx.lock().await.take().map(|tx| {
-                tx.send(Err(AnthropicAuthError::InvalidAuthorizationCode))
-            });
+            let _ = state
+                .tx
+                .lock()
+                .await
+                .take()
+                .map(|tx| tx.send(Err(AnthropicAuthError::InvalidAuthorizationCode)));
             Html(
                 r#"
                 <html>

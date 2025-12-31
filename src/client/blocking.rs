@@ -2,9 +2,9 @@ use oauth2::PkceCodeChallenge;
 use rand::Rng;
 use url::Url;
 
+use super::shared::*;
 use crate::types::{ApiKeyResponse, TokenResponse};
 use crate::{OAuthConfig, OAuthFlow, OAuthMode, Result, TokenSet};
-use super::shared::*;
 
 /// Synchronous Anthropic OAuth client for authentication
 ///
@@ -87,7 +87,7 @@ impl OAuthClient {
         // Build authorization URL
         let auth_url = format!("https://{}/oauth/authorize", base_domain);
         let mut url = Url::parse(&auth_url)?;
-        
+
         url.query_pairs_mut()
             .append_pair("code", "true")
             .append_pair("client_id", &self.config.client_id)
@@ -145,10 +145,15 @@ impl OAuthClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn exchange_code(&self, code_with_state: &str, expected_state: &str, verifier: &str) -> Result<TokenSet> {
+    pub fn exchange_code(
+        &self,
+        code_with_state: &str,
+        expected_state: &str,
+        verifier: &str,
+    ) -> Result<TokenSet> {
         // Parse code and state from the input
         let (code, state) = parse_code_and_state(code_with_state, expected_state)?;
-        
+
         // Validate inputs
         validate_code(&code)?;
         validate_state(&state)?;
@@ -156,11 +161,8 @@ impl OAuthClient {
 
         let client = reqwest::blocking::Client::new();
         let request_body = build_token_request(&code, &state, verifier, &self.config.client_id);
-        
-        let response = client
-            .post(TOKEN_URL)
-            .json(&request_body)
-            .send()?;
+
+        let response = client.post(TOKEN_URL).json(&request_body).send()?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -170,12 +172,12 @@ impl OAuthClient {
 
         let token_response: TokenResponse = response.json()?;
         let tokens = TokenSet::from(token_response);
-        
+
         // Validate the token structure
         tokens.validate().map_err(|e| {
             crate::AnthropicAuthError::OAuth(format!("Invalid token response: {}", e))
         })?;
-        
+
         Ok(tokens)
     }
 
@@ -216,11 +218,8 @@ impl OAuthClient {
 
         let client = reqwest::blocking::Client::new();
         let request_body = build_refresh_request(refresh_token, &self.config.client_id);
-        
-        let response = client
-            .post(TOKEN_URL)
-            .json(&request_body)
-            .send()?;
+
+        let response = client.post(TOKEN_URL).json(&request_body).send()?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -230,12 +229,12 @@ impl OAuthClient {
 
         let token_response: TokenResponse = response.json()?;
         let tokens = TokenSet::from(token_response);
-        
+
         // Validate the token structure
         tokens.validate().map_err(|e| {
             crate::AnthropicAuthError::OAuth(format!("Invalid token response: {}", e))
         })?;
-        
+
         Ok(tokens)
     }
 
@@ -274,7 +273,7 @@ impl OAuthClient {
 
         let client = reqwest::blocking::Client::new();
         let request_body = build_api_key_request();
-        
+
         let response = client
             .post(API_KEY_URL)
             .header("authorization", format!("Bearer {}", access_token))
@@ -288,14 +287,14 @@ impl OAuthClient {
         }
 
         let key_response: ApiKeyResponse = response.json()?;
-        
+
         // Validate API key is not empty
         if key_response.raw_key.is_empty() {
             return Err(crate::AnthropicAuthError::OAuth(
                 "Received empty API key from server".to_string(),
             ));
         }
-        
+
         Ok(key_response.raw_key)
     }
 }
@@ -304,7 +303,10 @@ impl OAuthClient {
 fn generate_random_state() -> String {
     let mut rng = rand::thread_rng();
     let random_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
-    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &random_bytes)
+    base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &random_bytes,
+    )
 }
 
 /// Parse code and state from the authorization response
@@ -329,17 +331,15 @@ fn parse_code_and_state(code_with_state: &str, expected_state: &str) -> Result<(
         // Parse "code#state" format
         let code = &code_with_state[..hash_pos];
         let returned_state = &code_with_state[hash_pos + 1..];
-        
+
         // Validate state for CSRF protection
         if returned_state != expected_state {
-            return Err(crate::AnthropicAuthError::OAuth(
-                format!(
-                    "State mismatch - possible CSRF attack. Expected: {}, Got: {}",
-                    expected_state, returned_state
-                )
-            ));
+            return Err(crate::AnthropicAuthError::OAuth(format!(
+                "State mismatch - possible CSRF attack. Expected: {}, Got: {}",
+                expected_state, returned_state
+            )));
         }
-        
+
         Ok((code.to_string(), returned_state.to_string()))
     } else {
         // No "#" found, assume just the code was provided
