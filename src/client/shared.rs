@@ -8,7 +8,6 @@ pub(super) const TOKEN_ACCEPT: &str = "application/json, text/plain, */*";
 pub(super) const TOKEN_USER_AGENT: &str = "axios/1.13.6";
 pub(super) const API_KEY_URL: &str =
     "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
-pub(crate) const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 
 /// Build the token exchange request body
 pub(super) fn build_token_request(
@@ -150,6 +149,16 @@ pub(super) fn validate_verifier(verifier: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate access token format
+pub(super) fn validate_access_token(token: &str) -> Result<()> {
+    if token.is_empty() {
+        return Err(AnthropicAuthError::OAuth(
+            "Access token is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +194,10 @@ mod tests {
         }
     }
 
+    #[cfg(any(
+        feature = "blocking",
+        all(feature = "async", feature = "reqwest-transport")
+    ))]
     fn assert_flow(flow: crate::OAuthFlow, redirect_uri: &str, host: &str) {
         let url = url::Url::parse(&flow.authorization_url).unwrap();
         assert_eq!(url.host_str(), Some(host));
@@ -211,6 +224,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(
+        feature = "blocking",
+        all(feature = "async", feature = "reqwest-transport")
+    ))]
     fn authorization_and_exchange_use_the_same_redirect() {
         for config in [
             crate::OAuthConfig::default(),
@@ -231,7 +248,7 @@ mod tests {
                     &config.redirect_uri,
                     host,
                 );
-                #[cfg(feature = "async")]
+                #[cfg(all(feature = "async", feature = "reqwest-transport"))]
                 assert_flow(
                     crate::AsyncOAuthClient::new(config.clone())
                         .unwrap()
@@ -243,14 +260,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Validate access token format
-pub(super) fn validate_access_token(token: &str) -> Result<()> {
-    if token.is_empty() {
-        return Err(AnthropicAuthError::OAuth(
-            "Access token is empty".to_string(),
-        ));
-    }
-    Ok(())
 }

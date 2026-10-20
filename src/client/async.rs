@@ -1,5 +1,8 @@
+use crate::transport::{AsyncHttpTransport, HttpRequest};
 use oauth2::PkceCodeChallenge;
 use rand::Rng;
+use serde::de::DeserializeOwned;
+use std::sync::Arc;
 use url::Url;
 
 use super::shared::*;
@@ -9,11 +12,14 @@ use crate::{OAuthConfig, OAuthFlow, OAuthMode, Result, TokenSet};
 /// Asynchronous Anthropic OAuth client for authentication
 ///
 /// This client handles the OAuth 2.0 flow with PKCE for Anthropic/Claude authentication
-/// using async I/O. Works with any async runtime (tokio, async-std, etc.).
+/// using an injected HTTP transport. The optional reqwest adapter requires Tokio;
+/// custom transports can use any executor.
 ///
 /// # Example
 ///
 /// ```no_run
+/// # #[cfg(feature = "reqwest-transport")]
+/// # {
 /// use anthropic_auth::{AsyncOAuthClient, OAuthConfig, OAuthMode};
 ///
 /// #[tokio::main]
@@ -28,9 +34,11 @@ use crate::{OAuthConfig, OAuthFlow, OAuthMode, Result, TokenSet};
 ///     println!("Got tokens!");
 ///     Ok(())
 /// }
+/// # }
 /// ```
 pub struct AsyncOAuthClient {
     config: OAuthConfig,
+    transport: Arc<dyn AsyncHttpTransport>,
 }
 
 impl AsyncOAuthClient {
@@ -43,8 +51,77 @@ impl AsyncOAuthClient {
     /// # Errors
     ///
     /// Returns an error if the configuration is invalid
+    #[cfg(feature = "reqwest-transport")]
     pub fn new(config: OAuthConfig) -> Result<Self> {
-        Ok(Self { config })
+        Self::with_transport(config, crate::transport::ReqwestTransport::new()?)
+    }
+
+    /// Construct a client with HTTP I/O supplied by the caller's runtime.
+    ///
+    /// The transport is reused for exchange, refresh, and API-key creation. This
+    /// constructor does not start a runtime or perform network I/O.
+    ///
+    /// This offline example runs on a non-Tokio executor:
+    ///
+    /// ```
+    /// use anthropic_auth::{AsyncOAuthClient, OAuthConfig};
+    /// use anthropic_auth::transport::{AsyncHttpTransport, HttpRequest, HttpResponse, TransportFuture};
+    ///
+    /// struct OfflineTransport;
+    /// impl AsyncHttpTransport for OfflineTransport {
+    ///     fn send(&self, _request: HttpRequest) -> TransportFuture<'_> {
+    ///         Box::pin(async {
+    ///             Ok(HttpResponse {
+    ///                 status: 200,
+    ///                 body: br#"{"access_token":"access","refresh_token":"rotated","expires_in":3600}"#.to_vec(),
+    ///             })
+    ///         })
+    ///     }
+    /// }
+    ///
+    /// let client = AsyncOAuthClient::with_transport(OAuthConfig::default(), OfflineTransport)?;
+    /// let tokens = futures::executor::block_on(client.refresh_token("old-refresh"))?;
+    /// assert_eq!(tokens.refresh_token, "rotated");
+    /// # Ok::<(), anthropic_auth::AnthropicAuthError>(())
+    /// ```
+    pub fn with_transport(
+        config: OAuthConfig,
+        transport: impl AsyncHttpTransport + 'static,
+    ) -> Result<Self> {
+        Ok(Self {
+            config,
+            transport: Arc::new(transport),
+        })
+    }
+
+    async fn post_json<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        access_token: Option<&str>,
+    ) -> Result<T> {
+        let mut headers = vec![("content-type".into(), "application/json".into())];
+        if let Some(token) = access_token {
+            headers.push(("authorization".into(), format!("Bearer {token}")));
+        } else {
+            headers.push(("accept".into(), TOKEN_ACCEPT.into()));
+            headers.push(("user-agent".into(), TOKEN_USER_AGENT.into()));
+        }
+        let response = self
+            .transport
+            .send(HttpRequest {
+                url: url.to_string(),
+                headers,
+                body: serde_json::to_vec(&body)?,
+            })
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(create_http_error(
+                response.status,
+                &String::from_utf8_lossy(&response.body),
+            ));
+        }
+        Ok(serde_json::from_slice(&response.body)?)
     }
 
     /// Start the OAuth authorization flow
@@ -65,12 +142,15 @@ impl AsyncOAuthClient {
     /// # Example
     ///
     /// ```no_run
+    /// # #[cfg(feature = "reqwest-transport")]
+    /// # {
     /// # use anthropic_auth::{AsyncOAuthClient, OAuthConfig, OAuthMode};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = AsyncOAuthClient::new(OAuthConfig::default())?;
     /// let flow = client.start_flow(OAuthMode::Max)?;
     /// println!("Visit: {}", flow.authorization_url);
     /// # Ok(())
+    /// # }
     /// # }
     /// ```
     pub fn start_flow(&self, mode: OAuthMode) -> Result<OAuthFlow> {
@@ -137,6 +217,8 @@ impl AsyncOAuthClient {
     /// # Example
     ///
     /// ```no_run
+    /// # #[cfg(feature = "reqwest-transport")]
+    /// # {
     /// # use anthropic_auth::{AsyncOAuthClient, OAuthConfig, OAuthMode};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = AsyncOAuthClient::new(OAuthConfig::default())?;
@@ -146,6 +228,7 @@ impl AsyncOAuthClient {
     /// let tokens = client.exchange_code(response, &flow.state, &flow.verifier).await?;
     /// println!("Access token expires in: {:?}", tokens.expires_in());
     /// # Ok(())
+    /// # }
     /// # }
     /// ```
     pub async fn exchange_code(
@@ -162,7 +245,6 @@ impl AsyncOAuthClient {
         validate_state(&state)?;
         validate_verifier(verifier)?;
 
-        let client = reqwest::Client::new();
         let request_body = build_token_request(
             &code,
             &state,
@@ -171,21 +253,7 @@ impl AsyncOAuthClient {
             &self.config.redirect_uri,
         );
 
-        let response = client
-            .post(TOKEN_URL)
-            .header("accept", TOKEN_ACCEPT)
-            .header("user-agent", TOKEN_USER_AGENT)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(create_http_error(status, &body));
-        }
-
-        let token_response: TokenResponse = response.json().await?;
+        let token_response: TokenResponse = self.post_json(TOKEN_URL, request_body, None).await?;
         let tokens = TokenSet::from(token_response);
 
         // Validate the token structure
@@ -216,12 +284,15 @@ impl AsyncOAuthClient {
     /// # Example
     ///
     /// ```no_run
+    /// # #[cfg(feature = "reqwest-transport")]
+    /// # {
     /// # use anthropic_auth::{AsyncOAuthClient, OAuthConfig};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = AsyncOAuthClient::new(OAuthConfig::default())?;
     /// # let old_tokens = client.exchange_code("code", "state", "verifier").await?;
     /// let new_tokens = client.refresh_token(&old_tokens.refresh_token).await?;
     /// # Ok(())
+    /// # }
     /// # }
     /// ```
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenSet> {
@@ -231,24 +302,9 @@ impl AsyncOAuthClient {
             ));
         }
 
-        let client = reqwest::Client::new();
         let request_body = build_refresh_request(refresh_token, &self.config.client_id);
 
-        let response = client
-            .post(TOKEN_URL)
-            .header("accept", TOKEN_ACCEPT)
-            .header("user-agent", TOKEN_USER_AGENT)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(create_http_error(status, &body));
-        }
-
-        let token_response: TokenResponse = response.json().await?;
+        let token_response: TokenResponse = self.post_json(TOKEN_URL, request_body, None).await?;
         let tokens = TokenSet::from(token_response);
 
         // Validate the token structure
@@ -279,6 +335,8 @@ impl AsyncOAuthClient {
     /// # Example
     ///
     /// ```no_run
+    /// # #[cfg(feature = "reqwest-transport")]
+    /// # {
     /// # use anthropic_auth::{AsyncOAuthClient, OAuthConfig, OAuthMode};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let client = AsyncOAuthClient::new(OAuthConfig::default())?;
@@ -288,27 +346,16 @@ impl AsyncOAuthClient {
     /// println!("API Key: {}", api_key);
     /// # Ok(())
     /// # }
+    /// # }
     /// ```
     pub async fn create_api_key(&self, access_token: &str) -> Result<String> {
         validate_access_token(access_token)?;
 
-        let client = reqwest::Client::new();
         let request_body = build_api_key_request();
 
-        let response = client
-            .post(API_KEY_URL)
-            .header("authorization", format!("Bearer {}", access_token))
-            .json(&request_body)
-            .send()
+        let key_response: ApiKeyResponse = self
+            .post_json(API_KEY_URL, request_body, Some(access_token))
             .await?;
-
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body = response.text().await.unwrap_or_default();
-            return Err(create_http_error(status, &body));
-        }
-
-        let key_response: ApiKeyResponse = response.json().await?;
 
         // Validate API key is not empty
         if key_response.raw_key.is_empty() {
@@ -350,4 +397,184 @@ fn generate_random_state() -> String {
 /// Returns an error if the state doesn't match the expected state (CSRF protection)
 fn parse_code_and_state(input: &str, expected_state: &str) -> Result<(String, String)> {
     super::shared::parse_code_and_state(input, expected_state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::{HttpResponse, TransportFuture};
+    use crate::AnthropicAuthError;
+    use futures::executor::block_on;
+    use serde_json::json;
+    use std::{collections::VecDeque, sync::Mutex, task::Poll};
+
+    #[derive(Clone, Default)]
+    struct MockTransport {
+        requests: Arc<Mutex<Vec<HttpRequest>>>,
+        responses: Arc<Mutex<VecDeque<Result<HttpResponse>>>>,
+    }
+
+    impl MockTransport {
+        fn respond(&self, status: u16, body: &[u8]) {
+            self.responses.lock().unwrap().push_back(Ok(HttpResponse {
+                status,
+                body: body.to_vec(),
+            }));
+        }
+    }
+
+    impl AsyncHttpTransport for MockTransport {
+        fn send(&self, request: HttpRequest) -> TransportFuture<'_> {
+            Box::pin(async move {
+                // Exercise wakeups and genuinely suspended I/O without a Tokio runtime.
+                let mut yielded = false;
+                std::future::poll_fn(move |cx| {
+                    if yielded {
+                        Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.requests.lock().unwrap().push(request);
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected HTTP request")
+            })
+        }
+    }
+
+    const TOKENS: &[u8] = br#"{"access_token":"access","refresh_token":"rotated","expires_in":3600,"token_type":"Bearer"}"#;
+
+    fn assert_send<T: Send>(value: T) -> T {
+        value
+    }
+
+    #[test]
+    fn custom_transport_works_without_tokio() {
+        let transport = MockTransport::default();
+        transport.respond(200, TOKENS);
+        transport.respond(200, TOKENS);
+        transport.respond(200, br#"{"raw_key":"new-api-key"}"#);
+        let config = OAuthConfig::builder()
+            .redirect_uri("https://platform.claude.com/oauth/code/callback")
+            .build();
+        let client = AsyncOAuthClient::with_transport(config.clone(), transport.clone()).unwrap();
+        let flow = client.start_flow(OAuthMode::Max).unwrap();
+        let response = format!("authorization-code#{}", flow.state);
+        let tokens = block_on(assert_send(client.exchange_code(
+            &response,
+            &flow.state,
+            &flow.verifier,
+        )))
+        .unwrap();
+        assert_eq!(tokens.refresh_token, "rotated");
+        assert_eq!(
+            block_on(client.refresh_token("old-refresh"))
+                .unwrap()
+                .access_token,
+            "access"
+        );
+        assert_eq!(
+            block_on(client.create_api_key("console-access")).unwrap(),
+            "new-api-key"
+        );
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[..2] {
+            assert_eq!(request.url, TOKEN_URL);
+            assert!(request
+                .headers
+                .contains(&("accept".into(), TOKEN_ACCEPT.into())));
+            assert!(request
+                .headers
+                .contains(&("user-agent".into(), TOKEN_USER_AGENT.into())));
+            assert!(request
+                .headers
+                .contains(&("content-type".into(), "application/json".into())));
+            assert!(!request
+                .headers
+                .iter()
+                .any(|(name, _)| name == "authorization"));
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            json!({
+                "grant_type": "authorization_code", "code": "authorization-code", "state": flow.state,
+                "code_verifier": flow.verifier, "client_id": config.client_id, "redirect_uri": config.redirect_uri,
+            })
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[1].body).unwrap(),
+            json!({
+                "grant_type": "refresh_token", "refresh_token": "old-refresh", "client_id": config.client_id,
+            })
+        );
+        assert_eq!(requests[2].url, API_KEY_URL);
+        assert!(requests[2]
+            .headers
+            .contains(&("authorization".into(), "Bearer console-access".into())));
+        assert_eq!(requests[2].body, b"{}");
+    }
+
+    #[test]
+    fn invalid_inputs_never_reach_transport() {
+        let transport = MockTransport::default();
+        let client =
+            AsyncOAuthClient::with_transport(OAuthConfig::default(), transport.clone()).unwrap();
+        let flow = client.start_flow(OAuthMode::Max).unwrap();
+        for response in [
+            "authorization-code",
+            "authorization-code#wrong",
+            "code=x&state=wrong",
+        ] {
+            assert!(block_on(client.exchange_code(response, &flow.state, &flow.verifier)).is_err());
+        }
+        let response = format!("authorization-code#{}", flow.state);
+        assert!(block_on(client.exchange_code(&response, &flow.state, "short")).is_err());
+        assert!(block_on(client.refresh_token("")).is_err());
+        assert!(block_on(client.create_api_key("")).is_err());
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn custom_transport_preserves_error_handling() {
+        let transport = MockTransport::default();
+        let client =
+            AsyncOAuthClient::with_transport(OAuthConfig::default(), transport.clone()).unwrap();
+        transport.respond(401, b"expired token");
+        assert!(
+            matches!(block_on(client.refresh_token("refresh")), Err(AnthropicAuthError::Http { status: 401, body }) if body.contains("expired token"))
+        );
+        transport.respond(200, b"not json");
+        assert!(matches!(
+            block_on(client.refresh_token("refresh")),
+            Err(AnthropicAuthError::Serialization(_))
+        ));
+        transport.respond(200, br#"{"access_token":"","refresh_token":"refresh","expires_in":3600,"token_type":"Bearer"}"#);
+        assert!(matches!(
+            block_on(client.refresh_token("refresh")),
+            Err(AnthropicAuthError::OAuth(_))
+        ));
+        transport.respond(200, br#"{"raw_key":""}"#);
+        assert!(matches!(
+            block_on(client.create_api_key("access")),
+            Err(AnthropicAuthError::OAuth(_))
+        ));
+        transport
+            .responses
+            .lock()
+            .unwrap()
+            .push_back(Err(AnthropicAuthError::Transport(Box::new(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "transport timed out"),
+            ))));
+        assert!(matches!(
+            block_on(client.refresh_token("refresh")),
+            Err(AnthropicAuthError::Transport(_))
+        ));
+    }
 }

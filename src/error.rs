@@ -24,8 +24,13 @@ pub enum AnthropicAuthError {
     #[error("Invalid OAuth mode for this operation")]
     InvalidMode,
 
+    #[cfg(feature = "reqwest-transport")]
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
+
+    /// Error reported by an injected HTTP transport.
+    #[error("HTTP transport error: {0}")]
+    Transport(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[error("HTTP error: {status}")]
     Http { status: u16, body: String },

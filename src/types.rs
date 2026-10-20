@@ -101,7 +101,7 @@ impl Default for OAuthConfig {
     fn default() -> Self {
         Self {
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string(),
-            redirect_uri: crate::client::shared::REDIRECT_URI.to_string(),
+            redirect_uri: "https://platform.claude.com/oauth/code/callback".to_string(),
         }
     }
 }
@@ -174,6 +174,7 @@ impl From<TokenResponse> for TokenSet {
 }
 
 /// API key creation response
+#[cfg(any(feature = "blocking", feature = "async"))]
 #[derive(Debug, Deserialize)]
 pub(crate) struct ApiKeyResponse {
     pub raw_key: String,
