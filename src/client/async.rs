@@ -84,7 +84,7 @@ impl AsyncOAuthClient {
         // Determine base domain based on mode
         let base_domain = match mode {
             OAuthMode::Max => "claude.ai",
-            OAuthMode::Console => "console.anthropic.com",
+            OAuthMode::Console => "platform.claude.com",
         };
 
         // Build authorization URL
@@ -95,7 +95,7 @@ impl AsyncOAuthClient {
             .append_pair("code", "true")
             .append_pair("client_id", &self.config.client_id)
             .append_pair("response_type", "code")
-            .append_pair("redirect_uri", REDIRECT_URI)
+            .append_pair("redirect_uri", &self.config.redirect_uri)
             .append_pair("scope", SCOPE)
             .append_pair("code_challenge", pkce_challenge.as_str())
             .append_pair("code_challenge_method", "S256")
@@ -118,7 +118,7 @@ impl AsyncOAuthClient {
     /// # Arguments
     ///
     /// * `code_with_state` - The combined authorization response (format: "code#state")
-    ///   or just the code if already separated
+    ///   or a callback URL/query string containing both code and state
     /// * `expected_state` - The state token from the original flow (for CSRF validation)
     /// * `verifier` - The PKCE verifier from the original flow
     ///
@@ -163,9 +163,21 @@ impl AsyncOAuthClient {
         validate_verifier(verifier)?;
 
         let client = reqwest::Client::new();
-        let request_body = build_token_request(&code, &state, verifier, &self.config.client_id);
+        let request_body = build_token_request(
+            &code,
+            &state,
+            verifier,
+            &self.config.client_id,
+            &self.config.redirect_uri,
+        );
 
-        let response = client.post(TOKEN_URL).json(&request_body).send().await?;
+        let response = client
+            .post(TOKEN_URL)
+            .header("accept", TOKEN_ACCEPT)
+            .header("user-agent", TOKEN_USER_AGENT)
+            .json(&request_body)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -222,7 +234,13 @@ impl AsyncOAuthClient {
         let client = reqwest::Client::new();
         let request_body = build_refresh_request(refresh_token, &self.config.client_id);
 
-        let response = client.post(TOKEN_URL).json(&request_body).send().await?;
+        let response = client
+            .post(TOKEN_URL)
+            .header("accept", TOKEN_ACCEPT)
+            .header("user-agent", TOKEN_USER_AGENT)
+            .json(&request_body)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -320,7 +338,7 @@ fn generate_random_state() -> String {
 ///
 /// # Arguments
 ///
-/// * `code_with_state` - The authorization response (may contain "#state" or just the code)
+/// * `code_with_state` - The authorization response containing both code and state
 /// * `expected_state` - The state token from the original flow for validation
 ///
 /// # Returns
@@ -330,24 +348,6 @@ fn generate_random_state() -> String {
 /// # Errors
 ///
 /// Returns an error if the state doesn't match the expected state (CSRF protection)
-fn parse_code_and_state(code_with_state: &str, expected_state: &str) -> Result<(String, String)> {
-    if let Some(hash_pos) = code_with_state.find('#') {
-        // Parse "code#state" format
-        let code = &code_with_state[..hash_pos];
-        let returned_state = &code_with_state[hash_pos + 1..];
-
-        // Validate state for CSRF protection
-        if returned_state != expected_state {
-            return Err(crate::AnthropicAuthError::OAuth(format!(
-                "State mismatch - possible CSRF attack. Expected: {}, Got: {}",
-                expected_state, returned_state
-            )));
-        }
-
-        Ok((code.to_string(), returned_state.to_string()))
-    } else {
-        // No "#" found, assume just the code was provided
-        // Use the expected_state directly
-        Ok((code_with_state.to_string(), expected_state.to_string()))
-    }
+fn parse_code_and_state(input: &str, expected_state: &str) -> Result<(String, String)> {
+    super::shared::parse_code_and_state(input, expected_state)
 }

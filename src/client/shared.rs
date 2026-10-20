@@ -2,11 +2,13 @@ use crate::{AnthropicAuthError, Result};
 use serde_json::json;
 
 // OAuth constants
-pub(super) const SCOPE: &str = "org:create_api_key user:profile user:inference";
-pub(super) const TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+pub(super) const SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+pub(super) const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub(super) const TOKEN_ACCEPT: &str = "application/json, text/plain, */*";
+pub(super) const TOKEN_USER_AGENT: &str = "axios/1.13.6";
 pub(super) const API_KEY_URL: &str =
     "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
-pub(super) const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+pub(crate) const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
 
 /// Build the token exchange request body
 pub(super) fn build_token_request(
@@ -14,15 +16,49 @@ pub(super) fn build_token_request(
     state: &str,
     verifier: &str,
     client_id: &str,
+    redirect_uri: &str,
 ) -> serde_json::Value {
     json!({
         "code": code,
         "state": state,
         "grant_type": "authorization_code",
         "client_id": client_id,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "code_verifier": verifier,
     })
+}
+
+/// Parse all callback formats accepted by the working OAuth client without losing state.
+pub(super) fn parse_code_and_state(input: &str, expected_state: &str) -> Result<(String, String)> {
+    let input = input.trim();
+    let query = if let Ok(url) = url::Url::parse(input) {
+        url.query().unwrap_or_default().to_string()
+    } else if let Some((code, state)) = input.split_once('#') {
+        if code.is_empty() || state.is_empty() || state.contains('#') {
+            return Err(AnthropicAuthError::InvalidAuthorizationCode);
+        }
+        return checked_callback(code.to_string(), state.to_string(), expected_state);
+    } else {
+        input.trim_start_matches('?').to_string()
+    };
+    let params: std::collections::HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
+        .into_owned()
+        .collect();
+    match (params.get("code"), params.get("state")) {
+        (Some(code), Some(state)) if !code.is_empty() && !state.is_empty() => {
+            checked_callback(code.clone(), state.clone(), expected_state)
+        }
+        _ => Err(AnthropicAuthError::InvalidAuthorizationCode),
+    }
+}
+
+fn checked_callback(code: String, state: String, expected_state: &str) -> Result<(String, String)> {
+    if expected_state.is_empty() || state != expected_state {
+        return Err(AnthropicAuthError::OAuth(
+            "State mismatch - possible CSRF attack".to_string(),
+        ));
+    }
+    Ok((code, state))
 }
 
 /// Build the refresh token request body
@@ -112,6 +148,101 @@ pub(super) fn validate_verifier(verifier: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callbacks_preserve_and_validate_state() {
+        for input in [
+            "  authorization-code#expected-state  ",
+            "https://platform.claude.com/oauth/code/callback?code=authorization-code&state=expected-state",
+            "?code=authorization-code&state=expected-state",
+            "code=authorization-code&state=expected-state",
+        ] {
+            assert_eq!(parse_code_and_state(input, "expected-state").unwrap(),
+                ("authorization-code".into(), "expected-state".into()));
+        }
+        assert_eq!(
+            parse_code_and_state("code=hello%2Bworld&state=expected-state", "expected-state")
+                .unwrap()
+                .0,
+            "hello+world"
+        );
+        for input in [
+            "authorization-code",
+            "code=x",
+            "x#wrong",
+            "x#expected-state#extra",
+            "code=x&state=wrong",
+        ] {
+            assert!(
+                parse_code_and_state(input, "expected-state").is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    fn assert_flow(flow: crate::OAuthFlow, redirect_uri: &str, host: &str) {
+        let url = url::Url::parse(&flow.authorization_url).unwrap();
+        assert_eq!(url.host_str(), Some(host));
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(params["redirect_uri"], redirect_uri);
+        assert_eq!(params["scope"], SCOPE);
+        assert_eq!(params["state"], flow.state);
+        assert_eq!(params["code_challenge_method"], "S256");
+        let verifier = oauth2::PkceCodeVerifier::new(flow.verifier.clone());
+        assert_eq!(
+            params["code_challenge"],
+            oauth2::PkceCodeChallenge::from_code_verifier_sha256(&verifier).as_str()
+        );
+        let body = build_token_request(
+            "authorization-code",
+            &flow.state,
+            &flow.verifier,
+            &params["client_id"],
+            redirect_uri,
+        );
+        assert_eq!(body["redirect_uri"], redirect_uri);
+        assert_eq!(body["state"], flow.state);
+        assert_eq!(body["code_verifier"], flow.verifier);
+    }
+
+    #[test]
+    fn authorization_and_exchange_use_the_same_redirect() {
+        for config in [
+            crate::OAuthConfig::default(),
+            crate::OAuthConfig::builder().redirect_port(9123).build(),
+        ] {
+            for mode in [crate::OAuthMode::Max, crate::OAuthMode::Console] {
+                let host = if mode == crate::OAuthMode::Max {
+                    "claude.ai"
+                } else {
+                    "platform.claude.com"
+                };
+                #[cfg(feature = "blocking")]
+                assert_flow(
+                    crate::OAuthClient::new(config.clone())
+                        .unwrap()
+                        .start_flow(mode)
+                        .unwrap(),
+                    &config.redirect_uri,
+                    host,
+                );
+                #[cfg(feature = "async")]
+                assert_flow(
+                    crate::AsyncOAuthClient::new(config.clone())
+                        .unwrap()
+                        .start_flow(mode)
+                        .unwrap(),
+                    &config.redirect_uri,
+                    host,
+                );
+            }
+        }
+    }
 }
 
 /// Validate access token format

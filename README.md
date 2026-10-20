@@ -20,8 +20,17 @@ Provides both **synchronous** (blocking) and **asynchronous** (runtime-agnostic)
 
 ```toml
 [dependencies]
-anthropic-auth = "0.1"
+anthropic-auth = "0.2"
 ```
+
+## Changes in 0.2.0
+
+- Update OAuth token exchange, Console authorization, and the hosted callback to `platform.claude.com`.
+- Match the working OAuth scopes and token request headers.
+- Honor `OAuthConfig.redirect_uri` consistently during authorization and token exchange.
+- Accept `code#state`, full callback URLs, and query strings; trim input and validate returned state.
+- Breaking change: bare authorization codes are rejected. Pass the complete response containing both code and state.
+- The default redirect is the hosted code callback, not localhost. The optional local callback server only works with a supported loopback redirect configured explicitly.
 
 ## Quick Start (Sync API)
 
@@ -119,7 +128,7 @@ let flow = client.start_flow(OAuthMode::Console)?;
 let api_key = client.create_api_key(&tokens.access_token)?;
 ```
 
-- Authorization endpoint: `https://console.anthropic.com/oauth/authorize`
+- Authorization endpoint: `https://platform.claude.com/oauth/authorize`
 - Creates API keys that can be used independently
 - Useful for programmatic access
 
@@ -137,14 +146,14 @@ let api_key = client.create_api_key(&tokens.access_token)?;
 
 ```toml
 [dependencies]
-anthropic-auth = { version = "0.1", features = ["async"] }
+anthropic-auth = { version = "0.2", features = ["async"] }
 ```
 
 ### Enable callback server (full automation):
 
 ```toml
 [dependencies]
-anthropic-auth = { version = "0.1", features = ["callback-server"] }
+anthropic-auth = { version = "0.2", features = ["callback-server"] }
 tokio = { version = "1", features = ["full"] }
 ```
 

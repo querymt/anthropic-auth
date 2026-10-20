@@ -1,4 +1,4 @@
-mod shared;
+pub(crate) mod shared;
 
 #[cfg(feature = "blocking")]
 mod blocking;

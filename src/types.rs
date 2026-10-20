@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub enum OAuthMode {
     /// Claude Pro/Max subscription (uses claude.ai)
     Max,
-    /// API key creation (uses console.anthropic.com)
+    /// API key creation (uses platform.claude.com)
     Console,
 }
 
@@ -93,7 +93,7 @@ pub struct OAuthFlow {
 pub struct OAuthConfig {
     /// OAuth client ID (default: "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
     pub client_id: String,
-    /// Redirect URI for OAuth callback (default: "http://localhost:1455/callback")
+    /// Redirect URI for OAuth callback (default: hosted platform.claude.com code callback)
     pub redirect_uri: String,
 }
 
@@ -101,7 +101,7 @@ impl Default for OAuthConfig {
     fn default() -> Self {
         Self {
             client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string(),
-            redirect_uri: "http://localhost:1455/callback".to_string(),
+            redirect_uri: crate::client::shared::REDIRECT_URI.to_string(),
         }
     }
 }
